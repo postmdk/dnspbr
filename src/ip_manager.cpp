@@ -1,6 +1,7 @@
 #include "ip_manager.hpp"
 #include <arpa/inet.h>
 #include <cmath>
+#include <cstring>
 #include <syslog.h>
 #include "nlohmann/json.hpp"
 #include <ifaddrs.h>
@@ -30,8 +31,11 @@ static string get_interface_ip(const std::string& iface_name) {
     return ip_str;
 }
 
-IPManager::IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name, bool debug_mode)
-        : debug(debug_mode), fw_mark(mark), tunnel_interface(interface_name) {
+IPManager::IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name,
+                     bool debug_mode, const std::string& table_name_arg, int routing_table)
+        : debug(debug_mode), fw_mark(mark), table_name(table_name_arg),
+          mangle_table_name("mangle_" + table_name_arg), route_table(routing_table),
+          tunnel_interface(interface_name) {
     // Configure system routing tables if a specific tunnel interface is specified
     if (!tunnel_interface.empty()) {
         string iface_ip = get_interface_ip(tunnel_interface);
@@ -41,22 +45,26 @@ IPManager::IPManager(const std::string& cidr, const std::string& mark, const std
         } else {
             syslog(LOG_WARNING, "Interface %s specified, but IPv4 address not found yet!", tunnel_interface.c_str());
         }
+
+        string rt_str = to_string(route_table);
+
         // First, we remove any old rule with the same label, should any remain from previous runs.
-        string del_old_rule = "ip rule del fwmark " + fw_mark + " table 100 2>/dev/null";
+        string del_old_rule = "ip rule del fwmark " + fw_mark + " table " + rt_str + " 2>/dev/null";
         int __attribute__((unused)) res = system(del_old_rule.c_str());
-        // Automatically add a routing policy rule for labels (fwmark -> table 100)
-        string rule_cmd = "ip rule add fwmark " + fw_mark + " table 100 2>/dev/null";
+
+        // Automatically add a routing policy rule for labels (fwmark -> route_table)
+        string rule_cmd = "ip rule add fwmark " + fw_mark + " table " + rt_str + " 2>/dev/null";
         int ret_rule = system(rule_cmd.c_str());
         if (ret_rule != 0 && debug) {
             syslog(LOG_DEBUG, "ip rule add returned non-zero (might already exist)");
         }
 
-        // We route default traffic from table 100 to the specified tunnel interface.
-        string route_cmd = "ip route replace default dev " + tunnel_interface + " table 100";
+        // We route default traffic from route_table to the specified tunnel interface.
+        string route_cmd = "ip route replace default dev " + tunnel_interface + " table " + rt_str;
         int ret_route = system(route_cmd.c_str());
 
         if (ret_route == 0) {
-            syslog(LOG_NOTICE, "Successfully bound table 100 default route to device %s", tunnel_interface.c_str());
+            syslog(LOG_NOTICE, "Successfully bound table %d default route to device %s", route_table, tunnel_interface.c_str());
         } else {
             syslog(LOG_ERR, "Failed to execute route command for interface %s", tunnel_interface.c_str());
         }
@@ -73,7 +81,7 @@ IPManager::IPManager(const std::string& cidr, const std::string& mark, const std
         exit(EXIT_FAILURE);
     }
 
-    // Enabling JSON support
+    // Enabling JSON output for list queries
     nft_ctx_output_set_flags(nft, NFT_CTX_OUTPUT_JSON);
 
     // Parsing CIDR and initializing nftables
@@ -118,8 +126,8 @@ void IPManager::parse_cidr(const string& cidr) {
     }
 }
 
-bool IPManager::nft_run(const string& json_cmd) {
-    int res = nft_run_cmd_from_buffer(nft, json_cmd.c_str());
+bool IPManager::nft_run(const string& cmd) {
+    int res = nft_run_cmd_from_buffer(nft, cmd.c_str());
     return (res == 0);
 }
 
@@ -127,74 +135,37 @@ void IPManager::setup_base_structure() {
     // First, synchronize with the kernel (pull up old mappings)
     sync_with_kernel();
 
-    json::array_t commands;
+    std::string prefix_str = base_ip_str + "/" + std::to_string(prefix_len);
 
-    // 1. Add a table (if there is one, nothing will happen)
-    commands.push_back({{"add", {{"table", {{"family", "ip"}, {"name", "dnsmap"}}}}}});
+    std::string base_cmd =
+            "add table ip " + table_name + "\n"
+                                           "add map ip " + table_name + " fake_to_real { type ipv4_addr : ipv4_addr ; }\n"
+                                                                        "add chain ip " + table_name + " PREROUTING { type nat hook prerouting priority -100 ; policy accept ; }\n"
+                                                                                                       "flush chain ip " + table_name + " PREROUTING\n"
+                                                                                                                                        "add rule ip " + table_name + " PREROUTING ip daddr " + prefix_str +
+            " dnat ip to ip daddr map @fake_to_real\n";
 
-    // 2. Adding a map
-    commands.push_back({{"add", {{"map", {
-            {"family", "ip"}, {"table", "dnsmap"}, {"name", "fake_to_real"},
-            {"type", "ipv4_addr"}, {"map", "ipv4_addr"}
-    }}}}});
-
-    // 3. Adding a chain
-    commands.push_back({{"add", {{"chain", {
-            {"family", "ip"}, {"table", "dnsmap"}, {"name", "PREROUTING"},
-            {"type", "nat"}, {"hook", "prerouting"}, {"prio", -100}
-    }}}}});
-
-    // Clearing the chain before adding a rule to it
-    commands.push_back({{"flush", {{"chain", {
-            {"family", "ip"}, {"table", "dnsmap"}, {"name", "PREROUTING"}
-    }}}}});
-
-    // 4. Forming a DNAT rule
-    json rule_match = {
-            {"match", {
-                    {"left", {{"payload", {{"protocol", "ip"}, {"field", "daddr"}}}}},
-                    {"op", "=="},
-                    {"right", {{"prefix", {{"addr", base_ip_str}, {"len", prefix_len}}}}}
-            }}
-    };
-
-    json rule_action = {
-            {"dnat", {
-                    {"addr", {{"map", {
-                            {"key", {{"payload", {{"protocol", "ip"}, {"field", "daddr"}}}}},
-                            {"data", "@fake_to_real"}
-                    }}}}
-            }}
-    };
-
-    commands.push_back({{"add", {{"rule", {
-            {"family", "ip"}, {"table", "dnsmap"}, {"chain", "PREROUTING"},
-            {"expr", json::array({rule_match, rule_action})}
-    }}}}});
-
-    // Send everything in one batch
-    json final_json = {{"nftables", commands}};
-    if (!nft_run(final_json.dump())) {
-        syslog(LOG_ERR, "[ ERR ]: Failed to apply base dnsmap structure");
+    if (!nft_run(base_cmd)) {
+        const char* err_buf = nft_ctx_get_error_buffer(nft);
+        syslog(LOG_ERR, "[ ERR ]: Failed to apply base %s structure: %s",
+               table_name.c_str(), (err_buf && *err_buf) ? err_buf : "unknown nftables error");
         return;
     }
 
-    // 5. We create an independent table for early tagging, following the main initialization.
-    string mark_table_cmd = "add table ip mangle_dnsmap";
-    nft_run_cmd_from_buffer(nft, mark_table_cmd.c_str());
+    // Independent table for early tagging
+    std::string mark_cmd =
+            "add table ip " + mangle_table_name + "\n"
+                                                  "add chain ip " + mangle_table_name + " prerouting { type filter hook prerouting priority mangle ; policy accept ; }\n"
+                                                                                        "flush chain ip " + mangle_table_name + " prerouting\n"
+                                                                                                                                "add rule ip " + mangle_table_name + " prerouting ip daddr " + prefix_str +
+            " meta l4proto { tcp, udp } meta mark set " + fw_mark + "\n";
 
-    string mark_chain_cmd = "add chain ip mangle_dnsmap prerouting { type filter hook prerouting priority mangle; policy accept; }";
-    nft_run_cmd_from_buffer(nft, mark_chain_cmd.c_str());
-    
-    nft_run_cmd_from_buffer(nft, "flush chain ip mangle_dnsmap prerouting");
-
-    string mark_rule_cmd = "add rule ip mangle_dnsmap prerouting ip daddr " + base_ip_str + "/" + to_string(prefix_len) + 
-                           " meta l4proto { tcp, udp } meta mark set " + fw_mark;
-    
-    if (nft_run_cmd_from_buffer(nft, mark_rule_cmd.c_str()) != 0) {
-        syslog(LOG_ERR, "[ ERR ]: Failed to add early marking rule into mangle_dnsmap");
+    if (!nft_run(mark_cmd)) {
+        const char* err_buf = nft_ctx_get_error_buffer(nft);
+        syslog(LOG_ERR, "[ ERR ]: Failed to add early marking rule into %s: %s",
+               mangle_table_name.c_str(), (err_buf && *err_buf) ? err_buf : "unknown nftables error");
     } else if (debug) {
-        syslog(LOG_INFO, "[ OK  ]: Early marking rule successfully added.");
+        syslog(LOG_INFO, "[ OK  ]: Early marking rule successfully added to %s.", mangle_table_name.c_str());
     }
 }
 
@@ -220,45 +191,31 @@ uint32_t IPManager::get_or_create(uint32_t real_ip) {
     inet_ntop(AF_INET, &f_addr, f_s, INET_ADDRSTRLEN);
     inet_ntop(AF_INET, &r_addr, r_s, INET_ADDRSTRLEN);
 
-    // Adding an element to a map via JSON
-    json add_element = {
-            {"nftables", json::array({
-                {{"add", {{"element", {
-                    {"family", "ip"}, {"table", "dnsmap"}, {"name", "fake_to_real"},
-                    {"elem", json::array({ json::array({f_s, r_s}) })}
-                }}}}}
-            })}
-    };
+    std::string add_elem_cmd =
+            "add element ip " + table_name + " fake_to_real { " +
+            std::string(f_s) + " : " + std::string(r_s) + " }\n";
 
-    if (nft_run(add_element.dump()) && debug) {
-        syslog(LOG_INFO, "[  NEW  ]: Mapping created: %s -> %s", f_s, r_s);
+    if (nft_run(add_elem_cmd)) {
+        if (debug) {
+            syslog(LOG_INFO, "[  NEW  ]: Mapping created: %s -> %s", f_s, r_s);
+        }
+    } else {
+        const char* err_buf = nft_ctx_get_error_buffer(nft);
+        syslog(LOG_ERR, "[ ERR ]: Failed to add mapping %s -> %s in %s: %s",
+               f_s, r_s, table_name.c_str(), (err_buf && *err_buf) ? err_buf : "unknown nftables error");
     }
 
     return fake_ip;
 }
 
 void IPManager::sync_with_kernel() {
-    // Hiding library errors in an internal buffer
+    nft_ctx_output_set_flags(nft, NFT_CTX_OUTPUT_JSON);
     nft_ctx_buffer_error(nft);
-
-    // Hiding the standard output (list result)
-    nft_ctx_buffer_output(nft);
-    // Use "list map", this is the most stable way to get elements
-    json list_cmd = {
-            {"nftables", json::array({
-                {{"list", {
-                    {"map", {
-                        {"family", "ip"},
-                        {"table", "dnsmap"},
-                        {"name", "fake_to_real"}
-                    }}
-                }}}
-            })}
-    };
-
     nft_ctx_buffer_output(nft);
 
-    if (nft_run_cmd_from_buffer(nft, list_cmd.dump().c_str()) != 0) {
+    std::string list_cmd = "list map ip " + table_name + " fake_to_real\n";
+
+    if (nft_run_cmd_from_buffer(nft, list_cmd.c_str()) != 0) {
         // If the table doesn't exist yet (first run), just exit
         nft_ctx_get_error_buffer(nft);
         nft_ctx_get_output_buffer(nft);
@@ -267,48 +224,51 @@ void IPManager::sync_with_kernel() {
     }
 
     const char* output = nft_ctx_get_output_buffer(nft);
-    if (!output || strlen(output) == 0) {
-        nft_ctx_unbuffer_output(nft);
-        return;
-    }
+    if (output && strlen(output) > 0) {
+        try {
+            auto j_out = json::parse(output);
+            if (j_out.contains("nftables")) {
+                for (auto& item : j_out["nftables"]) {
+                    // Looking for the "map" object that contains "elem"
+                    if (item.contains("map") && item["map"].contains("elem")) {
+                        for (auto& elem : item["map"]["elem"]) {
+                            if (!elem.is_array() || elem.size() < 2) {
+                                continue;
+                            }
 
-    try {
-        auto j_out = json::parse(output);
-        if (j_out.contains("nftables")) {
-            for (auto& item : j_out["nftables"]) {
-                // Looking for the "map" object that contains "elem"
-                if (item.contains("map") && item["map"].contains("elem")) {
-                    for (auto& elem : item["map"]["elem"]) {
-                        string f_s, r_s;
+                            std::string f_s = elem[0].get<std::string>();
+                            std::string r_s = elem[1].get<std::string>();
 
-                        if (elem.is_array() && elem.size() >= 2) {
-                            f_s = elem[0].get<string>();
-                            r_s = elem[1].get<string>();
-                        } else {
-                            continue;
+                            struct in_addr f_addr{}, r_addr{};
+                            if (inet_pton(AF_INET, f_s.c_str(), &f_addr) <= 0 ||
+                                inet_pton(AF_INET, r_s.c_str(), &r_addr) <= 0) {
+                                continue;
+                            }
+
+                            uint32_t f_ip = ntohl(f_addr.s_addr);
+                            uint32_t r_ip = ntohl(r_addr.s_addr);
+
+                            // Synchronizing the internal map
+                            real_to_fake[r_ip] = f_ip;
+
+                            // Remove IP addresses from the free list (use remove+erase)
+                            free_ips.erase(
+                                    std::remove(free_ips.begin(), free_ips.end(), f_ip),
+                                    free_ips.end()
+                            );
                         }
-
-                        uint32_t f_ip = ntohl(inet_addr(f_s.c_str()));
-                        uint32_t r_ip = ntohl(inet_addr(r_s.c_str()));
-
-                        // Synchronizing the internal map
-                        real_to_fake[r_ip] = f_ip;
-
-                        // Remove IP addresses from the free list (use remove+erase)
-                        free_ips.erase(
-                                std::remove(free_ips.begin(), free_ips.end(), f_ip),
-                                free_ips.end()
-                        );
                     }
                 }
             }
+            if (!real_to_fake.empty()) {
+                syslog(LOG_INFO, "[ SYNC ]: Recovered %zu mappings from kernel", real_to_fake.size());
+            }
+        } catch (const std::exception& e) {
+            syslog(LOG_ERR, "[ ERR ]: Sync parse error: %s", e.what());
         }
-        if (!real_to_fake.empty()) {
-            syslog(LOG_INFO, "[ SYNC ]: Recovered %zu mappings from kernel", real_to_fake.size());
-        }
-    } catch (const std::exception& e) {
-        syslog(LOG_ERR, "[ ERR ]: Sync parse error: %s", e.what());
     }
 
+    nft_ctx_get_error_buffer(nft);
+    nft_ctx_get_output_buffer(nft);
     nft_ctx_unbuffer_output(nft);
 }

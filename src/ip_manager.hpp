@@ -10,7 +10,7 @@
 
 class IPManager {
 public:
-    IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name, bool debug_mode = false);
+    IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name, bool debug_mode = false, const std::string& table_name = "dnsmap", int routing_table = 100);
     ~IPManager();
 
     uint32_t get_or_create(uint32_t real_ip);
@@ -19,6 +19,9 @@ private:
     bool debug;
     std::mutex mtx;
     std::string fw_mark;
+    std::string table_name;
+    std::string mangle_table_name;
+    int route_table;
     std::string base_ip_str;
     std::string tunnel_interface;
     int prefix_len;

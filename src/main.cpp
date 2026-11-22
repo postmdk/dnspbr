@@ -107,6 +107,7 @@ void print_usage(char* prog_name) {
     cout << "  -P, --upstream_port <port> Upstream DNS port (default: 53)" << endl;
     cout << "  -r, --range <cidr>         Fake IP range (default: 10.64.0.0/15)" << endl;
     cout << "  -m, --mark <mark>          Fwmark for matched traffic (default: 0x40)" << endl;
+    cout << "  -t, --table <name>         nftables table name (default: dnsmap)" << endl;
     cout << "  -i, --interface <name>     Tunnel interface for auto-IP and routing (optional)" << endl;
     cout << "  -w, --workers <num>        Number of worker threads (default: 4)" << endl;
     cout << "  -d, --daemonize            Run as daemon (background)" << endl;
@@ -122,6 +123,8 @@ int main(int argc, char** argv) {
     int upstream_port = 53;
     string range = "10.64.0.0/15";
     string fw_mark = "0x40";
+    string table_name = "dnsmap";
+    int route_table = 100;
     string interface_name = "";
     int num_workers = 2; // default value 2
     bool debug_mode = false;
@@ -134,6 +137,8 @@ int main(int argc, char** argv) {
         {"upstream_port", required_argument, 0, 'P'},
         {"range",     required_argument, 0, 'r'},
         {"mark",      required_argument, 0, 'm'},
+        {"table",     required_argument, 0, 't'},
+        {"route_table", required_argument, 0, 'T'},
         {"interface",     required_argument, 0, 'i'},
         {"workers",   required_argument, 0, 'w'},
         {"daemonize", no_argument,       0, 'd'},
@@ -153,6 +158,8 @@ int main(int argc, char** argv) {
             case 'P': upstream_port = stoi(optarg); break;
             case 'r': range = optarg; break;
             case 'm': fw_mark = optarg; break;
+            case 't': table_name = optarg; break;
+            case 'T': route_table = stoi(optarg); break;
             case 'i': interface_name = optarg; break;
             case 'w': num_workers = stoi(optarg); break;
             case 'd': should_daemonize = true; break;
@@ -178,7 +185,7 @@ int main(int argc, char** argv) {
     signal(SIGINT, signal_handler);
 
     try {
-        IPManager ip_manager(range, fw_mark, interface_name, debug_mode);
+        IPManager ip_manager(range, fw_mark, interface_name, debug_mode, table_name, route_table);
         int server_sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (server_sock < 0) return 1;
 
