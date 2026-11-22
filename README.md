@@ -9,8 +9,6 @@ It intercepts DNS queries for target domains, maps resolved IP addresses into vi
 * **High Performance & Low Latency:** Written in native C++ with multi-threading support (`libpthread`).
 * **Dynamic IP Mapping:** Automatically intercepts DNS responses and maps resolved IPs into a predefined internal subnet (`route_subnet`).
 * **`nftables` Integration:** Automatically applies firewall marks (`0x40`) for targeted routing rules.
-* **Modern OpenWrt Support:** Dynamic discovery of jail/chroot paths for `dnsmasq` (`/tmp/dnsmasq.*.d/`).
-* **Multi-Arch & Multi-Version Builds:** Pre-compiled binaries for `aarch64_cortex-a53` and `mipsel_24kc` supporting OpenWrt versions `24.10.x` (`.ipk`) and `25.12.x` (`.apk`).
 
 ## Packet Flow Architecture
 
