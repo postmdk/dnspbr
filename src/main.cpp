@@ -1,10 +1,10 @@
+#include <thread>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <queue>
 #include <mutex>
 #include <condition_variable>
-#include <thread>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <syslog.h>
@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <getopt.h>
 #include <cerrno>
+#include <cstdlib>
 
 #include "ip_manager.hpp"
 #include "dns_processor.hpp"
@@ -19,7 +20,7 @@
 using namespace std;
 
 #ifndef VERSION
-#define VERSION "1.1.3"
+#define VERSION "1.2.1"
 #endif
 
 struct DNSJob {
@@ -50,7 +51,7 @@ void worker_thread(int server_sock, struct sockaddr_in upstream_addr, IPManager&
         setsockopt(up_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         sendto(up_sock, job.data.data(), job.data.size(), 0, (struct sockaddr*)&upstream_addr, sizeof(upstream_addr));
-        
+
         uint8_t res_buf[4096];
         ssize_t rn = recv(up_sock, res_buf, sizeof(res_buf), 0);
         close(up_sock);
@@ -106,10 +107,11 @@ void print_usage(char* prog_name) {
     cout << "  -u, --upstream <ip>        Upstream DNS server (default: 9.9.9.10)" << endl;
     cout << "  -P, --upstream_port <port> Upstream DNS port (default: 53)" << endl;
     cout << "  -r, --range <cidr>         Fake IP range (default: 10.64.0.0/15)" << endl;
-    cout << "  -m, --mark <mark>          Fwmark for matched traffic (default: 0x40)" << endl;
+    cout << "  -m, --mark <mark>          Fwmark for matched traffic, 0 disables marking (default: 0)" << endl;
     cout << "  -t, --table <name>         nftables table name (default: dnsmap)" << endl;
+    cout << "  -T, --route_table <id>     Routing table ID for PBR (default: 100)" << endl;
     cout << "  -i, --interface <name>     Tunnel interface for auto-IP and routing (optional)" << endl;
-    cout << "  -w, --workers <num>        Number of worker threads (default: 4)" << endl;
+    cout << "  -w, --workers <num>        Number of worker threads (default: 2)" << endl;
     cout << "  -d, --daemonize            Run as daemon (background)" << endl;
     cout << "  -v, --verbose              Enable verbose debug logging" << endl;
     cout << "  -V, --version              Show version information" << endl;
@@ -122,35 +124,35 @@ int main(int argc, char** argv) {
     string upstream_ip = "9.9.9.10";
     int upstream_port = 53;
     string range = "10.64.0.0/15";
-    string fw_mark = "0x40";
+    string fw_mark = "0";
     string table_name = "dnsmap";
     int route_table = 100;
     string interface_name = "";
-    int num_workers = 2; // default value 2
+    int num_workers = 2;
     bool debug_mode = false;
     bool should_daemonize = false;
 
     static struct option long_options[] = {
-        {"listen",    required_argument, 0, 'a'},
-        {"port",      required_argument, 0, 'p'},
-        {"upstream",  required_argument, 0, 'u'},
-        {"upstream_port", required_argument, 0, 'P'},
-        {"range",     required_argument, 0, 'r'},
-        {"mark",      required_argument, 0, 'm'},
-        {"table",     required_argument, 0, 't'},
-        {"route_table", required_argument, 0, 'T'},
-        {"interface",     required_argument, 0, 'i'},
-        {"workers",   required_argument, 0, 'w'},
-        {"daemonize", no_argument,       0, 'd'},
-        {"verbose",   no_argument,       0, 'v'},
-        {"version",   no_argument,       0, 'V'},
-        {"help",      no_argument,       0, 'h'},
-        {0, 0, 0, 0}
+            {"listen",        required_argument, 0, 'a'},
+            {"port",          required_argument, 0, 'p'},
+            {"upstream",      required_argument, 0, 'u'},
+            {"upstream_port", required_argument, 0, 'P'},
+            {"range",         required_argument, 0, 'r'},
+            {"mark",          required_argument, 0, 'm'},
+            {"table",         required_argument, 0, 't'},
+            {"route_table",   required_argument, 0, 'T'},
+            {"interface",     required_argument, 0, 'i'},
+            {"workers",       required_argument, 0, 'w'},
+            {"daemonize",     no_argument,       0, 'd'},
+            {"verbose",       no_argument,       0, 'v'},
+            {"version",       no_argument,       0, 'V'},
+            {"help",          no_argument,       0, 'h'},
+            {0, 0, 0, 0}
     };
 
     int opt;
     int option_index = 0;
-    while ((opt = getopt_long(argc, argv, "a:p:u:P:r:m:i:w:dvhV", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "a:p:u:P:r:m:t:T:i:w:dvhV", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'a': listen_ip = optarg; break;
             case 'p': port = stoi(optarg); break;
@@ -165,19 +167,20 @@ int main(int argc, char** argv) {
             case 'd': should_daemonize = true; break;
             case 'v': debug_mode = true; break;
             case 'V': cout << "DNSMap version " << VERSION << endl; return 0;
-            case 'h': default: print_usage(argv[0]); return 0;
+            case 'h': print_usage(argv[0]); return 0;
+            default: print_usage(argv[0]); return 1;
         }
     }
 
     if (num_workers < 1) num_workers = 1;
 
     if (std::getenv("INVOCATION_ID") != nullptr) {
-        openlog("dnsmap", LOG_PID, LOG_DAEMON);
+        openlog(table_name.c_str(), LOG_PID, LOG_DAEMON);
     } else if (should_daemonize) {
         daemonize();
-        openlog("dnsmap", LOG_PID, LOG_DAEMON);
+        openlog(table_name.c_str(), LOG_PID, LOG_DAEMON);
     } else {
-        openlog("dnsmap", LOG_PID | LOG_PERROR, LOG_USER);
+        openlog(table_name.c_str(), LOG_PID | LOG_PERROR, LOG_USER);
     }
 
     setlogmask(LOG_UPTO(debug_mode ? LOG_DEBUG : LOG_NOTICE));
@@ -210,7 +213,8 @@ int main(int argc, char** argv) {
         upstream_addr.sin_port = htons(upstream_port);
         inet_pton(AF_INET, upstream_ip.c_str(), &upstream_addr.sin_addr);
 
-        vector<thread> workers;
+        //vector<thread> workers;
+        std::vector<std::thread> workers;
         for (int i = 0; i < num_workers; ++i) {
             workers.emplace_back(worker_thread, server_sock, upstream_addr, std::ref(ip_manager), debug_mode);
         }

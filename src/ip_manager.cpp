@@ -1,9 +1,10 @@
+#include "nlohmann/json.hpp"
 #include "ip_manager.hpp"
 #include <arpa/inet.h>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <syslog.h>
-#include "nlohmann/json.hpp"
 #include <ifaddrs.h>
 #include <netinet/in.h>
 #include <algorithm>
@@ -36,6 +37,8 @@ IPManager::IPManager(const std::string& cidr, const std::string& mark, const std
         : debug(debug_mode), fw_mark(mark), table_name(table_name_arg),
           mangle_table_name("mangle_" + table_name_arg), route_table(routing_table),
           tunnel_interface(interface_name) {
+    uint32_t mark_val = static_cast<uint32_t>(std::strtoul(fw_mark.c_str(), nullptr, 0));
+
     // Configure system routing tables if a specific tunnel interface is specified
     if (!tunnel_interface.empty()) {
         string iface_ip = get_interface_ip(tunnel_interface);
@@ -48,15 +51,19 @@ IPManager::IPManager(const std::string& cidr, const std::string& mark, const std
 
         string rt_str = to_string(route_table);
 
-        // First, we remove any old rule with the same label, should any remain from previous runs.
-        string del_old_rule = "ip rule del fwmark " + fw_mark + " table " + rt_str + " 2>/dev/null";
-        int __attribute__((unused)) res = system(del_old_rule.c_str());
+        if (mark_val != 0) {
+            // First, we remove any old rule with the same label, should any remain from previous runs.
+            string del_old_rule = "ip rule del fwmark " + fw_mark + " table " + rt_str + " 2>/dev/null";
+            int __attribute__((unused)) res = system(del_old_rule.c_str());
 
-        // Automatically add a routing policy rule for labels (fwmark -> route_table)
-        string rule_cmd = "ip rule add fwmark " + fw_mark + " table " + rt_str + " 2>/dev/null";
-        int ret_rule = system(rule_cmd.c_str());
-        if (ret_rule != 0 && debug) {
-            syslog(LOG_DEBUG, "ip rule add returned non-zero (might already exist)");
+            // Automatically add a routing policy rule for labels (fwmark -> route_table)
+            string rule_cmd = "ip rule add fwmark " + fw_mark + " table " + rt_str + " 2>/dev/null";
+            int ret_rule = system(rule_cmd.c_str());
+            if (ret_rule != 0 && debug) {
+                syslog(LOG_DEBUG, "ip rule add returned non-zero (might already exist)");
+            }
+        } else if (debug) {
+            syslog(LOG_DEBUG, "fw_mark is 0: skipping ip rule fwmark creation.");
         }
 
         // We route default traffic from route_table to the specified tunnel interface.
@@ -152,20 +159,32 @@ void IPManager::setup_base_structure() {
         return;
     }
 
-    // Independent table for early tagging
-    std::string mark_cmd =
-            "add table ip " + mangle_table_name + "\n"
-                                                  "add chain ip " + mangle_table_name + " prerouting { type filter hook prerouting priority mangle ; policy accept ; }\n"
-                                                                                        "flush chain ip " + mangle_table_name + " prerouting\n"
-                                                                                                                                "add rule ip " + mangle_table_name + " prerouting ip daddr " + prefix_str +
-            " meta l4proto { tcp, udp } meta mark set " + fw_mark + "\n";
+    uint32_t mark_val = static_cast<uint32_t>(std::strtoul(fw_mark.c_str(), nullptr, 0));
 
-    if (!nft_run(mark_cmd)) {
-        const char* err_buf = nft_ctx_get_error_buffer(nft);
-        syslog(LOG_ERR, "[ ERR ]: Failed to add early marking rule into %s: %s",
-               mangle_table_name.c_str(), (err_buf && *err_buf) ? err_buf : "unknown nftables error");
-    } else if (debug) {
-        syslog(LOG_INFO, "[ OK  ]: Early marking rule successfully added to %s.", mangle_table_name.c_str());
+    // Independent table for early tagging (only when fw_mark != 0)
+    if (mark_val != 0) {
+        std::string mark_cmd =
+                "add table ip " + mangle_table_name + "\n"
+                                                      "add chain ip " + mangle_table_name + " prerouting { type filter hook prerouting priority mangle ; policy accept ; }\n"
+                                                                                            "flush chain ip " + mangle_table_name + " prerouting\n"
+                                                                                                                                    "add rule ip " + mangle_table_name + " prerouting ip daddr " + prefix_str +
+                " meta l4proto { tcp, udp } meta mark set " + fw_mark + "\n";
+
+        if (!nft_run(mark_cmd)) {
+            const char* err_buf = nft_ctx_get_error_buffer(nft);
+            syslog(LOG_ERR, "[ ERR ]: Failed to add early marking rule into %s: %s",
+                   mangle_table_name.c_str(), (err_buf && *err_buf) ? err_buf : "unknown nftables error");
+        } else if (debug) {
+            syslog(LOG_INFO, "[ OK  ]: Early marking rule successfully added to %s.", mangle_table_name.c_str());
+        }
+    } else {
+        std::string del_mangle_cmd = "delete table ip " + mangle_table_name + "\n";
+        nft_run(del_mangle_cmd);
+        nft_ctx_get_error_buffer(nft);
+
+        if (debug) {
+            syslog(LOG_INFO, "[ INFO ]: Marking disabled (fw_mark = 0) for %s.", table_name.c_str());
+        }
     }
 }
 

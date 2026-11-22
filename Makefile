@@ -1,7 +1,7 @@
 CXX = g++
 CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -pthread
 # add libnftables в LDFLAGS
-LDFLAGS = -lldns -lnftables
+LDFLAGS = -lldns -lnftables -pthread
 VERSION = 1.2.1
 CXXFLAGS += -DVERSION=\"$(VERSION)\"
 
