@@ -9,13 +9,13 @@ It intercepts DNS queries for target domains, maps resolved IP addresses into vi
 * **High Performance & Low Latency:** Written in native C++ with multi-threading support (`libpthread`).
 * **Dynamic IP Mapping:** Automatically intercepts DNS responses and maps resolved IPs into a predefined internal subnet (`route_subnet`).
 * **`nftables` Integration:** Automatically applies firewall marks (`0x40`) for targeted routing rules.
-
+* **Local Router Traffic (`OUTPUT` Chain Support):** Optional `-o` / `--output` mode generates `OUTPUT` (NAT) and `output` (mangle) `nftables` chains so locally originated traffic on the router (such as local SOCKS5/HTTP proxies or system utilities) is also translated and policy-routed.
 ## Packet Flow Architecture
 
 Below is the conceptual diagram showing how DNS requests and data traffic are processed by `dnspbr` and the Linux kernel routing stack.
 
 ```
-[ Client Device ]
+[ Client Device / Local Router App ]
        │
        │ 1. DNS Query (e.g., target.com)
        ▼
@@ -25,13 +25,18 @@ Below is the conceptual diagram showing how DNS requests and data traffic are pr
                                                                 ▼
                                                         [ Upstream DNS / DoH ]
                                                                 │
-[ Client Device ] ◄───(3. Modified IP response)───────── [ dnspbr Daemon ]
+[ Client / Local App ] ◄───(3. Modified IP response)──── [ dnspbr Daemon ]
        │
        │ 4. HTTP/TLS Traffic to Mapped IP (e.g., 10.30.0.X)
        ▼
-[ Linux Kernel (nftables) ] ───(Matches 10.30.0.0/16)───► Set mark (0x40)
+[ Linux Kernel (nftables) ]
+  ├─ PREROUTING / prerouting (LAN clients)
+  └─ OUTPUT / output (Local router traffic, requires -o)
        │
-       │ 5. PBR Rule (ip rule fwmark 0x40 lookup 100)
+       ├──► DNAT fake IP -> real IP (@fake_to_real) + Set fwmark (e.g., 0x40 / 0x101)
+       ▼
+[ PBR Rule (ip rule fwmark <mark> lookup <table>) ]
+       │
        ▼
 [ Target Interface ] (e.g., awg0 / wg0 / tun0)
 ```
@@ -44,6 +49,15 @@ Below is the conceptual diagram showing how DNS requests and data traffic are pr
 4. **Packet Tagging:** When the client sends IP traffic to the mapped IP range, `nftables` detects the target subnet and marks the IP packets with `fwmark 0x40`.
 5. **Policy Routing:** The Linux kernel routing table evaluates `fwmark 0x40` and redirects the traffic through the specified interface (e.g., AmneziaWG interface `awg0`).
 
+### In Debian/Ubuntu installing develop dependencies for build
+```bash
+sudo apt install libldns-dev libnftables-dev nlohmann-json3-dev
+```
+### Build
+```bash 
+make
+make ENABLE_OUTPUT=1 # (build with`OUTPUT` Chain Support)
+```
 ### Notice
 Restarting the firewall clears DNAT and mark rules, which is why the dnspbr daemon also needs to be restarted.
 ## License
