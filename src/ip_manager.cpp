@@ -32,11 +32,20 @@ static string get_interface_ip(const std::string& iface_name) {
     return ip_str;
 }
 
+#ifdef DNSPBR_ENABLE_OUTPUT
+IPManager::IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name,
+                     bool debug_mode, const std::string& table_name_arg, int routing_table,
+                     bool enable_output_chains)
+        : debug(debug_mode), enable_output(enable_output_chains), fw_mark(mark),
+          table_name(table_name_arg), mangle_table_name("mangle_" + table_name_arg),
+          route_table(routing_table), tunnel_interface(interface_name) {
+#else
 IPManager::IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name,
                      bool debug_mode, const std::string& table_name_arg, int routing_table)
         : debug(debug_mode), fw_mark(mark), table_name(table_name_arg),
           mangle_table_name("mangle_" + table_name_arg), route_table(routing_table),
           tunnel_interface(interface_name) {
+#endif
     uint32_t mark_val = static_cast<uint32_t>(std::strtoul(fw_mark.c_str(), nullptr, 0));
 
     // Configure system routing tables if a specific tunnel interface is specified
@@ -152,6 +161,16 @@ void IPManager::setup_base_structure() {
                                                                                                                                         "add rule ip " + table_name + " PREROUTING ip daddr " + prefix_str +
             " dnat ip to ip daddr map @fake_to_real\n";
 
+#ifdef DNSPBR_ENABLE_OUTPUT
+    if (enable_output) {
+        base_cmd +=
+            "add chain ip " + table_name + " OUTPUT { type nat hook output priority -100 ; policy accept ; }\n"
+            "flush chain ip " + table_name + " OUTPUT\n"
+            "add rule ip " + table_name + " OUTPUT ip daddr " + prefix_str +
+            " dnat ip to ip daddr map @fake_to_real\n";
+    }
+#endif
+
     if (!nft_run(base_cmd)) {
         const char* err_buf = nft_ctx_get_error_buffer(nft);
         syslog(LOG_ERR, "[ ERR ]: Failed to apply base %s structure: %s",
@@ -170,6 +189,16 @@ void IPManager::setup_base_structure() {
                                                                                                                                     "add rule ip " + mangle_table_name + " prerouting ip daddr " + prefix_str +
                 " meta l4proto { tcp, udp } meta mark set " + fw_mark + "\n";
 
+#ifdef DNSPBR_ENABLE_OUTPUT
+        if (enable_output) {
+            mark_cmd +=
+                "add chain ip " + mangle_table_name + " output { type filter hook output priority mangle ; policy accept ; }\n"
+                "flush chain ip " + mangle_table_name + " output\n"
+                "add rule ip " + mangle_table_name + " output ip daddr " + prefix_str +
+                " meta l4proto { tcp, udp } meta mark set " + fw_mark + "\n";
+        }
+#endif
+
         if (!nft_run(mark_cmd)) {
             const char* err_buf = nft_ctx_get_error_buffer(nft);
             syslog(LOG_ERR, "[ ERR ]: Failed to add early marking rule into %s: %s",
@@ -187,7 +216,6 @@ void IPManager::setup_base_structure() {
         }
     }
 }
-
 uint32_t IPManager::get_or_create(uint32_t real_ip) {
     std::lock_guard<std::mutex> lock(mtx);
     if (real_to_fake.count(real_ip)) {
