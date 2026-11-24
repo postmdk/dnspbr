@@ -2,7 +2,7 @@ CXX = g++
 CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -pthread
 # add libnftables в LDFLAGS
 LDFLAGS = -lldns -lnftables -pthread
-VERSION = 1.2.1
+VERSION = 1.2.2
 CXXFLAGS += -DVERSION=\"$(VERSION)\"
 
 # Dirs
@@ -13,6 +13,10 @@ BIN_DIR = bin
 # Files
 SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
 OBJECTS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SOURCES))
+ENABLE_OUTPUT ?= 0
+ifeq ($(ENABLE_OUTPUT),1)
+	override CXXFLAGS += -DDNSPBR_ENABLE_OUTPUT
+endif
 TARGET = $(BIN_DIR)/dnspbr
 
 .PHONY: all clean install

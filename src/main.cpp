@@ -112,6 +112,9 @@ void print_usage(char* prog_name) {
     cout << "  -T, --route_table <id>     Routing table ID for PBR (default: 100)" << endl;
     cout << "  -i, --interface <name>     Tunnel interface for auto-IP and routing (optional)" << endl;
     cout << "  -w, --workers <num>        Number of worker threads (default: 2)" << endl;
+#ifdef DNSPBR_ENABLE_OUTPUT
+    cout << "  -o, --output               Enable OUTPUT chains for local traffic NAT/marking" << endl;
+#endif
     cout << "  -d, --daemonize            Run as daemon (background)" << endl;
     cout << "  -v, --verbose              Enable verbose debug logging" << endl;
     cout << "  -V, --version              Show version information" << endl;
@@ -132,6 +135,10 @@ int main(int argc, char** argv) {
     bool debug_mode = false;
     bool should_daemonize = false;
 
+#ifdef DNSPBR_ENABLE_OUTPUT
+    bool enable_output = false;
+#endif
+
     static struct option long_options[] = {
             {"listen",        required_argument, 0, 'a'},
             {"port",          required_argument, 0, 'p'},
@@ -143,16 +150,23 @@ int main(int argc, char** argv) {
             {"route_table",   required_argument, 0, 'T'},
             {"interface",     required_argument, 0, 'i'},
             {"workers",       required_argument, 0, 'w'},
+#ifdef DNSPBR_ENABLE_OUTPUT
+            {"output",        no_argument,       0, 'o'},
+#endif
             {"daemonize",     no_argument,       0, 'd'},
             {"verbose",       no_argument,       0, 'v'},
             {"version",       no_argument,       0, 'V'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
     };
-
+#ifdef DNSPBR_ENABLE_OUTPUT
+    const char* short_opts = "a:p:u:P:r:m:t:T:i:w:odvhV";
+#else
+    const char* short_opts = "a:p:u:P:r:m:t:T:i:w:dvhV";
+#endif
     int opt;
     int option_index = 0;
-    while ((opt = getopt_long(argc, argv, "a:p:u:P:r:m:t:T:i:w:dvhV", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, short_opts, long_options, &option_index)) != -1) {
         switch (opt) {
             case 'a': listen_ip = optarg; break;
             case 'p': port = stoi(optarg); break;
@@ -164,6 +178,9 @@ int main(int argc, char** argv) {
             case 'T': route_table = stoi(optarg); break;
             case 'i': interface_name = optarg; break;
             case 'w': num_workers = stoi(optarg); break;
+#ifdef DNSPBR_ENABLE_OUTPUT
+                case 'o': enable_output = true; break;
+#endif
             case 'd': should_daemonize = true; break;
             case 'v': debug_mode = true; break;
             case 'V': cout << "DNSMap version " << VERSION << endl; return 0;
@@ -188,7 +205,11 @@ int main(int argc, char** argv) {
     signal(SIGINT, signal_handler);
 
     try {
+#ifdef DNSPBR_ENABLE_OUTPUT
+        IPManager ip_manager(range, fw_mark, interface_name, debug_mode, table_name, route_table, enable_output);
+#else
         IPManager ip_manager(range, fw_mark, interface_name, debug_mode, table_name, route_table);
+#endif
         int server_sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (server_sock < 0) return 1;
 

@@ -10,13 +10,23 @@
 
 class IPManager {
 public:
-    IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name, bool debug_mode = false, const std::string& table_name = "dnsmap", int routing_table = 100);
+#ifdef DNSPBR_ENABLE_OUTPUT
+    IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name,
+              bool debug_mode = false, const std::string& table_name = "dnsmap", int routing_table = 100,
+              bool enable_output_chains = false);
+#else
+    IPManager(const std::string& cidr, const std::string& mark, const std::string& interface_name,
+              bool debug_mode = false, const std::string& table_name = "dnsmap", int routing_table = 100);
+#endif
     ~IPManager();
 
     uint32_t get_or_create(uint32_t real_ip);
 
 private:
     bool debug;
+#ifdef DNSPBR_ENABLE_OUTPUT
+    bool enable_output;
+#endif
     std::mutex mtx;
     std::string fw_mark;
     std::string table_name;
