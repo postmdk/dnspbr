@@ -15,7 +15,7 @@ SOURCES = $(wildcard $(SRC_DIR)/*.cpp)
 OBJECTS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(SOURCES))
 ENABLE_OUTPUT ?= 0
 ifeq ($(ENABLE_OUTPUT),1)
-	CXXFLAGS += -DDNSPBR_ENABLE_OUTPUT
+	override CXXFLAGS += -DDNSPBR_ENABLE_OUTPUT
 endif
 TARGET = $(BIN_DIR)/dnspbr
 
